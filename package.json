@@ -1,0 +1,19 @@
+{
+  "name": "tapo-power-alert",
+  "version": "1.0.0",
+  "description": "Bun server to monitor Tapo P110 energy usage and send notifications when dryer finishes",
+  "type": "module",
+  "scripts": {
+    "start": "bun run server.js",
+    "dev": "bun run --watch server.js"
+  },
+  "dependencies": {},
+  "keywords": [
+    "bun",
+    "tapo",
+    "energy-monitoring",
+    "notifications"
+  ],
+  "author": "",
+  "license": "MIT"
+}
