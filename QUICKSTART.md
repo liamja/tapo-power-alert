@@ -1,116 +1,102 @@
-# Quick Start Guide
+# Quick Start
 
-Tapo Power Alert is a **single-file Bun application** - everything is in `server.js`.
+Get push notifications on your phone when the dryer finishes. Takes about 10 minutes.
 
-## 1. Prerequisites
+## What you need
 
-- Bun runtime installed (`curl -fsSL https://bun.sh/install | bash`)
-- A Tapo P110 smart plug connected to your network
-- A Postmark account (or other email service)
+- A **Tapo P110** smart plug on the dryer's power
+- A computer on the same home network (Mac, Linux, Raspberry Pi, etc.)
+- **[Bun](https://bun.sh)** installed
+- The **[ntfy](https://ntfy.sh)** app on each phone (free)
 
-## 2. Install and Configure
+## 1. Install Bun
 
 ```bash
-# Install Bun (if not already installed)
 curl -fsSL https://bun.sh/install | bash
+```
 
-# Clone and navigate to the project
+## 2. Configure
+
+```bash
 cd tapo-power-alert
-
-# Copy environment template
 cp .env.example .env
-
-# Edit .env with your settings
-nano .env
+nano .env   # or use any text editor
 ```
 
-Required `.env` variables:
-```bash
-TAPO_EMAIL=your_email@example.com
-TAPO_PASSWORD=your_password
-TAPO_DEVICE_IP=192.168.1.100  # Find your P110's IP in router
-EMAIL_FROM=noreply@yourdomain.com
-EMAIL_TO=your@email.com
-POSTMARK_API_TOKEN=your_token
+Fill in these values:
 
-# Optional (defaults shown)
-RUNNING_THRESHOLD=500     # Watts - dryer is running if above this
-COOLDOWN_READINGS=3       # Consecutive low readings before alert
-CHECK_INTERVAL=300        # Seconds between checks (300 = 5 min)
-PORT=3000
+```bash
+# Your Tapo account (same as the Tapo app)
+TAPO_EMAIL=you@example.com
+TAPO_PASSWORD=your_tapo_password
+TAPO_DEVICE_IP=192.168.1.100    # P110 IP — find it in your router
+
+# Pick a random topic name (both phones will subscribe to this)
+NTFY_TOPIC=dryer-finished-xK9m2pQ
 ```
 
-## 3. Run
+Everything else has sensible defaults. Email via Postmark is optional — see `.env.example` if you want it as a backup.
+
+**Find the P110 IP:** open your router's admin page → connected devices → look for the Tapo plug.
+
+## 3. Set up phones
+
+On **each phone**:
+
+1. Install **ntfy** ([iOS](https://apps.apple.com/app/ntfy/id1625396347) / [Android](https://play.google.com/store/apps/details?id=io.heckel.ntfy))
+2. Tap **+** → **Subscribe to topic**
+3. Enter your `NTFY_TOPIC` name (e.g. `dryer-finished-xK9m2pQ`)
+4. Tap **Subscribe**
+
+Both phones are done. One alert reaches everyone subscribed to the topic.
+
+## 4. Run
 
 ```bash
-# Development (with auto-reload)
-bun run dev
-
-# Production
 bun run start
 ```
 
-**Note:** On startup, the server validates your Tapo credentials:
-- ✅ Success: "Credentials validated successfully!"
-- ❌ Failure: Detailed error message with troubleshooting steps
+You should see:
 
-If validation fails, fix the issues and restart the server. The server will keep running but monitoring won't work until credentials are valid.
-
-## 4. Verify
-
-```bash
-# Check health
-curl http://localhost:3000/health
-
-# Get device status
-curl http://localhost:3000/status
-
-# Manual check
-curl http://localhost:3000/check
-
-# View monitoring state
-curl http://localhost:3000/state
-
-# Reset state (for testing)
-curl http://localhost:3000/reset
+```
+✅ Credentials validated successfully!
+📱 Push notifications enabled: https://ntfy.sh/dryer-finished-xK9m2pQ
+🚀 Tapo Power Alert running on http://localhost:3000
 ```
 
-## How It Works
+If credential validation fails, double-check `TAPO_DEVICE_IP` and your Tapo login.
 
-The monitor detects when your dryer stops by watching for the power to drop:
+## 5. Verify
 
-1. Checks power every 5 minutes (configurable)
-2. If power was above 500W and now below 500W, counts as "low reading"
-3. After 3 consecutive low readings (15 minutes total), sends notification
-4. Only one notification per drying cycle
+```bash
+curl http://localhost:3000/status    # current power draw
+curl http://localhost:3000/state      # monitoring state
+```
 
-**Simple. Reliable. Fast.**
+Run a dryer cycle and watch the logs. When it finishes you should get a push on both phones within a few minutes.
 
-## 5. (Optional) Run as a System Service
+## How it detects "finished"
 
-See `README.md` for detailed systemd and Docker setup instructions.
+1. Dryer heats up → power goes above **1500W** (cycle started)
+2. Dryer cools down → power drops to 100–300W (still running, no alert)
+3. Dryer stops → power drops below **50W**
+4. After **3 consecutive checks** at that low level (~3 minutes), push notification fires
+5. One notification per cycle
 
 ## Troubleshooting
 
-**Connection failed?**
-- Check device IP in router
-- Ensure device is on same network
-- Ping the device: `ping <device_ip>`
+| Problem | Fix |
+|---------|-----|
+| Connection failed | Check `TAPO_DEVICE_IP` in router; ping the device |
+| No push notification | Confirm both phones subscribed to the exact `NTFY_TOPIC` |
+| Alert too early | Increase `COOLDOWN_READINGS` or `OFF_THRESHOLD` in `.env` |
+| Alert too late | Decrease `COOLDOWN_READINGS` or `CHECK_INTERVAL` in `.env` |
+| Missed alert after restart | Server lost in-memory state — it'll catch the next cycle |
 
-**No email?**
-- Check Postmark API token
-- Verify sender email in Postmark dashboard
-- Check spam folder
+## Run on boot (optional)
 
-**False alerts?**
-- Increase `COOLDOWN_READINGS` to 5 or 7
-- Increase `RUNNING_THRESHOLD` to 700 or 1000
+See [README.md](README.md) for systemd and Docker setup.
 
-**Missed alerts?**
-- Decrease `RUNNING_THRESHOLD` to 300 or 400
-- Decrease `COOLDOWN_READINGS` to 1 or 2
-- Check logs to see power readings
+## More detail
 
-## Need More Info?
-
-See `README.md` for comprehensive documentation.
+See [README.md](README.md) for all configuration options, API endpoints, and tuning.

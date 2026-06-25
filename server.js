@@ -10,8 +10,15 @@ const CONFIG = {
   EMAIL_FROM: process.env.EMAIL_FROM,
   EMAIL_TO: process.env.EMAIL_TO,
   POSTMARK_API_TOKEN: process.env.POSTMARK_API_TOKEN,
-  RUNNING_THRESHOLD: parseInt(process.env.RUNNING_THRESHOLD) || 500,
+  NTFY_TOPIC: process.env.NTFY_TOPIC,
+  NTFY_SERVER: process.env.NTFY_SERVER || 'https://ntfy.sh',
+  API_KEY: process.env.API_KEY,
+  RUNNING_THRESHOLD: parseInt(process.env.RUNNING_THRESHOLD) || 800,
+  HEATING_THRESHOLD: parseInt(process.env.HEATING_THRESHOLD) || 1500,
+  OFF_THRESHOLD: parseInt(process.env.OFF_THRESHOLD) || 50,
   COOLDOWN_READINGS: parseInt(process.env.COOLDOWN_READINGS) || 3,
+  CHECK_INTERVAL: parseInt(process.env.CHECK_INTERVAL) || 60,
+  PORT: parseInt(process.env.PORT) || 3000,
 };
 
 function validateEnvironment() {
@@ -36,6 +43,12 @@ function validateEnvironment() {
   if (!CONFIG.EMAIL_TO) {
     console.log('⚠️  EMAIL_TO not set - email notifications will be disabled');
   }
+  if (!CONFIG.NTFY_TOPIC) {
+    console.log('⚠️  NTFY_TOPIC not set - push notifications will be disabled');
+  }
+  if (!CONFIG.NTFY_TOPIC && !(CONFIG.POSTMARK_API_TOKEN && CONFIG.EMAIL_TO)) {
+    console.log('⚠️  No notification channels configured - set NTFY_TOPIC and/or email settings');
+  }
   console.log('');
 }
 
@@ -43,8 +56,23 @@ let state = {
   previousPower: 0,
   consecutiveLowReadings: 0,
   notificationSent: false,
+  hasSeenHeatingThisCycle: false,
   isFirstCheck: true,
 };
+
+let tapoClient = null;
+
+function checkApiAuth(req) {
+  if (!CONFIG.API_KEY) return true;
+  const url = new URL(req.url);
+  const headerKey = req.headers.get('Authorization')?.replace(/^Bearer\s+/i, '');
+  const queryKey = url.searchParams.get('key');
+  return headerKey === CONFIG.API_KEY || queryKey === CONFIG.API_KEY;
+}
+
+function unauthorizedResponse() {
+  return Response.json({ error: 'Unauthorized' }, { status: 401 });
+}
 
 class TapoCrypto {
   static sha1(data) {
@@ -55,6 +83,11 @@ class TapoCrypto {
   static sha256(data) {
     const buffer = typeof data === 'string' ? Buffer.from(data, 'utf8') : Buffer.from(data);
     return crypto.createHash('sha256').update(buffer).digest();
+  }
+
+  static md5(data) {
+    const buffer = typeof data === 'string' ? Buffer.from(data, 'utf8') : Buffer.from(data);
+    return crypto.createHash('md5').update(buffer).digest();
   }
   
   static getRandomBytes(length) {
@@ -68,6 +101,81 @@ class TapoCrypto {
   static arrayToHex(array) {
     return Buffer.from(array).toString('hex');
   }
+}
+
+function generateAuthHashV2(username, password) {
+  const usernameHash = TapoCrypto.sha1(username);
+  const passwordHash = TapoCrypto.sha1(password);
+  return TapoCrypto.sha256(TapoCrypto.concatBuffers(usernameHash, passwordHash));
+}
+
+function generateAuthHashV1(username, password) {
+  const usernameHash = TapoCrypto.md5(username);
+  const passwordHash = TapoCrypto.md5(password);
+  return TapoCrypto.md5(TapoCrypto.concatBuffers(usernameHash, passwordHash));
+}
+
+function handshake1HashV2(localSeed, remoteSeed, authHash) {
+  return TapoCrypto.sha256(TapoCrypto.concatBuffers(localSeed, remoteSeed, authHash));
+}
+
+function handshake1HashV1(localSeed, remoteSeed, authHash) {
+  return TapoCrypto.sha256(TapoCrypto.concatBuffers(localSeed, authHash));
+}
+
+function handshake2HashV2(localSeed, remoteSeed, authHash) {
+  return TapoCrypto.sha256(TapoCrypto.concatBuffers(remoteSeed, localSeed, authHash));
+}
+
+function handshake2HashV1(localSeed, remoteSeed, authHash) {
+  return TapoCrypto.sha256(TapoCrypto.concatBuffers(remoteSeed, authHash));
+}
+
+function buildAuthCandidates(username, password) {
+  const candidates = [
+  {
+    label: 'KLAP v2 (Tapo account)',
+    authHash: generateAuthHashV2(username, password),
+    handshake1: handshake1HashV2,
+    handshake2: handshake2HashV2,
+  },
+  {
+    label: 'KLAP v1 (Tapo account)',
+    authHash: generateAuthHashV1(username, password),
+    handshake1: handshake1HashV1,
+    handshake2: handshake2HashV1,
+  },
+  {
+    label: 'KLAP v2 (blank credentials)',
+    authHash: generateAuthHashV2('', ''),
+    handshake1: handshake1HashV2,
+    handshake2: handshake2HashV2,
+  },
+  {
+    label: 'KLAP v1 (blank credentials)',
+    authHash: generateAuthHashV1('', ''),
+    handshake1: handshake1HashV1,
+    handshake2: handshake2HashV1,
+  },
+  {
+    label: 'KLAP v2 (Tapo factory default)',
+    authHash: generateAuthHashV2('test@tp-link.net', 'test'),
+    handshake1: handshake1HashV2,
+    handshake2: handshake2HashV2,
+  },
+  ];
+
+  return candidates;
+}
+
+function printAuthTroubleshooting() {
+  console.error('Authentication troubleshooting:');
+  console.error('   1. In the Tapo app: Me → Third-Party Services → enable Third-Party Compatibility');
+  console.error('      (toggle off and on if already enabled)');
+  console.error('   2. TAPO_EMAIL and TAPO_PASSWORD must match your Tapo account exactly (case-sensitive)');
+  console.error('   3. If the plug was set up while other Tapo devices were plugged in, factory-reset');
+  console.error('      the P110 and add it again with only this device powered on');
+  console.error('   4. Confirm the IP in the Tapo app matches TAPO_DEVICE_IP');
 }
 
 class KlapCipher {
@@ -165,29 +273,38 @@ class KlapProtocol {
     this.cookie = '';
     this.cipher = null;
     this.baseUrl = '';
+    this.handshake2Fn = handshake2HashV2;
   }
   
-  async login(deviceIP, username, password) {
+  async login(deviceIP, username, password, { quiet = false } = {}) {
     this.baseUrl = `http://${deviceIP}/app`;
     
-    console.log(`🔌 Connecting to P110 at ${this.baseUrl}`);
-    
-    const usernameHash = TapoCrypto.sha1(username);
-    const passwordHash = TapoCrypto.sha1(password);
-    const authHash = TapoCrypto.sha256(TapoCrypto.concatBuffers(usernameHash, passwordHash));
+    if (!quiet) {
+      console.log(`🔌 Connecting to P110 at ${this.baseUrl}`);
+    }
     
     const localSeed = TapoCrypto.getRandomBytes(16);
     
-    const remoteSeed = await this.handshake1(localSeed, authHash);
-    await this.handshake2(localSeed, remoteSeed, authHash);
+    const { remoteSeed, authHash, handshake2, label } = await this.handshake1(
+      localSeed,
+      username,
+      password,
+      quiet
+    );
+    this.handshake2Fn = handshake2;
+    await this.handshake2(localSeed, remoteSeed, authHash, quiet);
     
     this.cipher = await KlapCipher.create(localSeed, remoteSeed, authHash);
     
-    console.log('✅ KLAP authentication successful');
+    if (!quiet) {
+      console.log(`✅ KLAP authentication successful (${label})`);
+    }
   }
   
-  async handshake1(localSeed, authHash) {
-    console.log('🤝 Performing handshake1');
+  async handshake1(localSeed, username, password, quiet = false) {
+    if (!quiet) {
+      console.log('🤝 Performing handshake1');
+    }
     
     const response = await fetch(`${this.baseUrl}/handshake1`, {
       method: 'POST',
@@ -197,6 +314,12 @@ class KlapProtocol {
       }
     });
     
+    if (response.status === 403) {
+      throw new Error(
+        'Handshake1 forbidden (403). Enable Third-Party Compatibility in the Tapo app: Me → Third-Party Services.'
+      );
+    }
+
     if (!response.ok) {
       throw new Error(`Handshake1 failed: ${response.status}`);
     }
@@ -217,21 +340,34 @@ class KlapProtocol {
     
     const remoteSeed = responseBody.slice(0, 16);
     const serverHash = responseBody.slice(16, 48);
-    
-    const expectedHash = TapoCrypto.sha256(TapoCrypto.concatBuffers(localSeed, remoteSeed, authHash));
-    
-    if (!serverHash.equals(expectedHash)) {
-      throw new Error('Invalid server hash in handshake1. Check credentials.');
+    const candidates = buildAuthCandidates(username, password);
+
+    for (const candidate of candidates) {
+      const expectedHash = candidate.handshake1(localSeed, remoteSeed, candidate.authHash);
+      if (serverHash.equals(expectedHash)) {
+        if (!quiet) {
+          console.log(`✅ Handshake1 successful (${candidate.label})`);
+        }
+        return {
+          remoteSeed,
+          authHash: candidate.authHash,
+          handshake2: candidate.handshake2,
+          label: candidate.label,
+        };
+      }
     }
-    
-    console.log('✅ Handshake1 successful');
-    return remoteSeed;
+
+    throw new Error(
+      'Authentication failed during handshake1. The device responded, but credentials did not match.'
+    );
   }
   
-  async handshake2(localSeed, remoteSeed, authHash) {
-    console.log('🤝 Performing handshake2');
+  async handshake2(localSeed, remoteSeed, authHash, quiet = false) {
+    if (!quiet) {
+      console.log('🤝 Performing handshake2');
+    }
     
-    const payload = TapoCrypto.sha256(TapoCrypto.concatBuffers(remoteSeed, localSeed, authHash));
+    const payload = this.handshake2Fn(localSeed, remoteSeed, authHash);
     
     const response = await fetch(`${this.baseUrl}/handshake2`, {
       method: 'POST',
@@ -246,7 +382,9 @@ class KlapProtocol {
       throw new Error(`Handshake2 failed: ${response.status}`);
     }
     
-    console.log('✅ Handshake2 successful');
+    if (!quiet) {
+      console.log('✅ Handshake2 successful');
+    }
   }
   
   async executeRequest(request) {
@@ -286,8 +424,8 @@ class TapoLocalClient {
     this.protocol = new KlapProtocol();
   }
   
-  async connect(deviceIP, username, password) {
-    await this.protocol.login(deviceIP, username, password);
+  async connect(deviceIP, username, password, options = {}) {
+    await this.protocol.login(deviceIP, username, password, options);
   }
   
   async getEnergyUsage() {
@@ -307,12 +445,43 @@ class TapoLocalClient {
   }
 }
 
-async function sendNotification(data) {
+async function sendNtfyNotification(data) {
+  if (!CONFIG.NTFY_TOPIC) {
+    return { success: false, error: 'ntfy not configured' };
+  }
+
+  try {
+    const url = `${CONFIG.NTFY_SERVER.replace(/\/$/, '')}/${CONFIG.NTFY_TOPIC}`;
+    const body = `Dryer finished! Power is now ${data.currentPower.toFixed(1)}W (was ${data.previousPower.toFixed(1)}W).`;
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Title': '🧺 Dryer Finished!',
+        'Priority': 'high',
+        'Tags': 'laundry,white_check_mark',
+      },
+      body,
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`ntfy error: ${response.status} - ${errorText}`);
+    }
+
+    console.log('📱 Push notification sent via ntfy');
+    return { success: true };
+  } catch (error) {
+    console.error('❌ ntfy notification failed:', error.message);
+    return { success: false, error: error.message };
+  }
+}
+
+async function sendEmailNotification(data) {
   if (!CONFIG.POSTMARK_API_TOKEN || !CONFIG.EMAIL_TO) {
-    console.log('📧 Email not configured, skipping notification');
     return { success: false, error: 'Email not configured' };
   }
-  
+
   try {
     const subject = '🧺 Dryer Finished!';
     const body = `
@@ -325,7 +494,7 @@ Checked at: ${new Date().toLocaleString()}
 --
 Tapo Power Alert
     `.trim();
-    
+
     const payload = {
       From: CONFIG.EMAIL_FROM || 'Tapo Alert <noreply@yourdomain.com>',
       To: CONFIG.EMAIL_TO,
@@ -333,7 +502,7 @@ Tapo Power Alert
       TextBody: body,
       MessageStream: 'outbound'
     };
-    
+
     const response = await fetch('https://api.postmarkapp.com/email', {
       method: 'POST',
       headers: {
@@ -343,15 +512,15 @@ Tapo Power Alert
       },
       body: JSON.stringify(payload)
     });
-    
+
     if (!response.ok) {
       const errorText = await response.text();
       throw new Error(`Postmark error: ${response.status} - ${errorText}`);
     }
-    
+
     const result = await response.json();
-    console.log('📧 Notification sent successfully');
-    
+    console.log('📧 Email notification sent successfully');
+
     return {
       success: true,
       messageId: result.MessageID
@@ -365,24 +534,86 @@ Tapo Power Alert
   }
 }
 
+async function sendNotifications(data) {
+  const channels = {};
+
+  if (CONFIG.NTFY_TOPIC) {
+    channels.ntfy = await sendNtfyNotification(data);
+  }
+
+  if (CONFIG.POSTMARK_API_TOKEN && CONFIG.EMAIL_TO) {
+    channels.email = await sendEmailNotification(data);
+  }
+
+  if (Object.keys(channels).length === 0) {
+    console.log('⚠️  No notification channels configured, skipping notification');
+    return { success: false, error: 'No notification channels configured', channels };
+  }
+
+  const success = Object.values(channels).some(result => result.success);
+  return { success, channels };
+}
+
+function isSessionError(error) {
+  const message = error.message || '';
+  return message.includes('Session timeout') || message.includes('re-authenticate');
+}
+
+async function getTapoClient(forceReconnect = false) {
+  if (forceReconnect) {
+    tapoClient = null;
+  }
+
+  if (!tapoClient) {
+    const client = new TapoLocalClient();
+    try {
+      await client.connect(
+        CONFIG.TAPO_DEVICE_IP,
+        CONFIG.TAPO_EMAIL,
+        CONFIG.TAPO_PASSWORD,
+        { quiet: forceReconnect }
+      );
+      tapoClient = client;
+    } catch (error) {
+      tapoClient = null;
+      throw error;
+    }
+  }
+
+  return tapoClient;
+}
+
+async function readEnergyUsage(client) {
+  const energyData = await client.getEnergyUsage();
+  const currentPowerMw = energyData.current_power || 0;
+  const currentPower = currentPowerMw / 1000;
+
+  return {
+    success: true,
+    deviceOnline: true,
+    power: currentPower,
+    voltage: energyData.voltage_mv ? energyData.voltage_mv / 1000 : undefined,
+    current: energyData.current_ma ? energyData.current_ma / 1000 : undefined,
+    totalEnergy: energyData.today_energy || energyData.today_energy_wh,
+    timestamp: new Date().toISOString()
+  };
+}
+
 async function getTapoDeviceStatus() {
   try {
-    const client = new TapoLocalClient();
-    await client.connect(CONFIG.TAPO_DEVICE_IP, CONFIG.TAPO_EMAIL, CONFIG.TAPO_PASSWORD);
-    
-    const energyData = await client.getEnergyUsage();
-    const currentPowerMw = energyData.current_power || 0;
-    const currentPower = currentPowerMw / 1000;
-    
-    return {
-      success: true,
-      deviceOnline: true,
-      power: currentPower,
-      voltage: energyData.voltage_mv ? energyData.voltage_mv / 1000 : undefined,
-      current: energyData.current_ma ? energyData.current_ma / 1000 : undefined,
-      totalEnergy: energyData.today_energy || energyData.today_energy_wh,
-      timestamp: new Date().toISOString()
-    };
+    let client = await getTapoClient();
+
+    try {
+      return await readEnergyUsage(client);
+    } catch (error) {
+      if (!isSessionError(error)) {
+        throw error;
+      }
+
+      console.log('🔄 Tapo session expired, reconnecting...');
+      client = await getTapoClient(true);
+      return await readEnergyUsage(client);
+    }
   } catch (error) {
     console.error('❌ Error getting device status:', error.message);
     return {
@@ -410,48 +641,53 @@ async function checkDryerStatus() {
     
     const currentPower = deviceStatus.power;
     const runningThreshold = CONFIG.RUNNING_THRESHOLD;
+    const heatingThreshold = CONFIG.HEATING_THRESHOLD;
+    const offThreshold = CONFIG.OFF_THRESHOLD;
     const cooldownReadings = CONFIG.COOLDOWN_READINGS;
+    const previousPower = state.previousPower;
+    const wasRunning = previousPower > runningThreshold;
+    const isRunning = currentPower > runningThreshold;
+    const isHeating = currentPower > heatingThreshold;
+    const isOff = currentPower < offThreshold;
     
-    console.log(`⚡ Power: ${currentPower.toFixed(1)}W (threshold: ${runningThreshold}W, previous: ${state.previousPower.toFixed(1)}W)`);
+    console.log(`⚡ Power: ${currentPower.toFixed(1)}W (heating: >${heatingThreshold}W, off: <${offThreshold}W, previous: ${previousPower.toFixed(1)}W)`);
     
     let notificationResult = null;
     
     if (state.isFirstCheck) {
       console.log('📍 First check - initializing state');
       state.isFirstCheck = false;
-    } else {
-      const wasRunning = state.previousPower > runningThreshold;
-      const isRunning = currentPower > runningThreshold;
-      
-      if (wasRunning && !isRunning) {
-        state.consecutiveLowReadings++;
-        
-        console.log(`📉 Power dropped: ${state.consecutiveLowReadings}/${cooldownReadings} low readings`);
-        
-        if (state.consecutiveLowReadings >= cooldownReadings && !state.notificationSent) {
-          console.log(`🎉 Dryer finished! Sending notification...`);
-          
-          notificationResult = await sendNotification({
-            currentPower,
-            previousPower: state.previousPower
-          });
-          
-          if (notificationResult.success) {
-            state.notificationSent = true;
-          }
-        }
-      } else if (isRunning) {
-        if (state.notificationSent) {
-          console.log('🔄 New cycle detected - resetting notification flag');
-        }
-        
-        state.consecutiveLowReadings = 0;
-        state.notificationSent = false;
-        console.log(`🔄 Dryer is running (${currentPower.toFixed(1)}W)`);
-      } else {
-        state.consecutiveLowReadings = 0;
-        console.log(`😴 Dryer remains off (${currentPower.toFixed(1)}W)`);
+    } else if (isHeating) {
+      if (state.notificationSent) {
+        console.log('🔄 New cycle detected - resetting notification flag');
       }
+
+      state.hasSeenHeatingThisCycle = true;
+      state.consecutiveLowReadings = 0;
+      state.notificationSent = false;
+      console.log(`🔥 Dryer heating (${currentPower.toFixed(1)}W)`);
+    } else if (state.hasSeenHeatingThisCycle && isOff) {
+      state.consecutiveLowReadings++;
+
+      console.log(`📉 Low power: ${state.consecutiveLowReadings}/${cooldownReadings} consecutive readings`);
+
+      if (state.consecutiveLowReadings >= cooldownReadings && !state.notificationSent) {
+        console.log('🎉 Dryer finished! Sending notification...');
+
+        notificationResult = await sendNotifications({
+          currentPower,
+          previousPower
+        });
+
+        if (notificationResult.success) {
+          state.notificationSent = true;
+        }
+      }
+    } else if (isRunning) {
+      state.consecutiveLowReadings = 0;
+      console.log(`🌀 Dryer running/cooling (${currentPower.toFixed(1)}W)`);
+    } else {
+      console.log(`😴 Idle (${currentPower.toFixed(1)}W)`);
     }
     
     state.previousPower = currentPower;
@@ -459,8 +695,11 @@ async function checkDryerStatus() {
     return {
       success: true,
       currentPower,
-      wasRunning: !state.isFirstCheck && state.previousPower > runningThreshold,
-      isRunning: currentPower > runningThreshold,
+      wasRunning,
+      isRunning,
+      isHeating,
+      isOff,
+      hasSeenHeatingThisCycle: state.hasSeenHeatingThisCycle,
       consecutiveLowReadings: state.consecutiveLowReadings,
       notificationSent: state.notificationSent,
       notificationResult,
@@ -478,6 +717,7 @@ function resetState() {
     previousPower: 0,
     consecutiveLowReadings: 0,
     notificationSent: false,
+    hasSeenHeatingThisCycle: false,
     isFirstCheck: true,
   };
   console.log('🔄 State reset');
@@ -491,9 +731,7 @@ async function validateCredentials() {
   console.log('🔐 Validating Tapo credentials...');
   
   try {
-    const client = new TapoLocalClient();
-    await client.connect(CONFIG.TAPO_DEVICE_IP, CONFIG.TAPO_EMAIL, CONFIG.TAPO_PASSWORD);
-    
+    const client = await getTapoClient();
     const energyData = await client.getEnergyUsage();
     const currentPower = (energyData.current_power || 0) / 1000;
     
@@ -501,6 +739,12 @@ async function validateCredentials() {
     console.log(`📊 Device is online and responding`);
     console.log(`⚡ Current power: ${currentPower.toFixed(1)}W`);
     
+    if (CONFIG.NTFY_TOPIC) {
+      console.log(`📱 Push notifications enabled: ${CONFIG.NTFY_SERVER}/${CONFIG.NTFY_TOPIC}`);
+    } else {
+      console.log(`📱 Push notifications disabled (set NTFY_TOPIC to enable)`);
+    }
+
     if (CONFIG.EMAIL_TO && CONFIG.POSTMARK_API_TOKEN) {
       console.log(`📧 Email notifications enabled: ${CONFIG.EMAIL_TO}`);
     } else {
@@ -512,12 +756,7 @@ async function validateCredentials() {
     console.error('❌ Credential validation failed!');
     console.error(`   Error: ${error.message}`);
     console.error('');
-    console.error('Please check:');
-    console.error('   • TAPO_DEVICE_IP is correct (check router DHCP table)');
-    console.error('   • TAPO_EMAIL is your Tapo account email');
-    console.error('   • TAPO_PASSWORD is correct');
-    console.error('   • Device is powered on and connected to your network');
-    console.error('   • Server can reach the device (try: ping <TAPO_DEVICE_IP>)');
+    printAuthTroubleshooting();
     console.error('');
     console.error('Server will continue running, but monitoring will fail until credentials are fixed.');
     console.error('');
@@ -532,14 +771,15 @@ validateEnvironment();
 
 validateCredentials().then((credentialsValid) => {
   const status = credentialsValid ? '✅ Ready to monitor' : '⚠️  Running in degraded mode';
-  console.log(`🚀 Tapo Power Alert running on http://localhost:${process.env.PORT || 3000}`);
+  console.log(`🚀 Tapo Power Alert running on http://localhost:${CONFIG.PORT}`);
   console.log(`   Status: ${status}`);
-  console.log(`📊 Running threshold: ${CONFIG.RUNNING_THRESHOLD}W`);
-  console.log(`🔁 Cooldown readings: ${CONFIG.COOLDOWN_READINGS}`);
+  console.log(`📊 Heating threshold: ${CONFIG.HEATING_THRESHOLD}W`);
+  console.log(`📊 Off threshold: ${CONFIG.OFF_THRESHOLD}W`);
+  console.log(`🔁 Cooldown readings: ${CONFIG.COOLDOWN_READINGS} (every ${CONFIG.CHECK_INTERVAL}s)`);
 });
 
 serve({
-  port: process.env.PORT || 3000,
+  port: CONFIG.PORT,
   async fetch(req) {
     const url = new URL(req.url);
     const path = url.pathname;
@@ -552,17 +792,21 @@ serve({
         return Response.json({ status: 'healthy', timestamp: new Date().toISOString() });
       
       case '/check':
+        if (!checkApiAuth(req)) return unauthorizedResponse();
         const checkResult = await checkDryerStatus();
         return Response.json(checkResult);
       
       case '/status':
+        if (!checkApiAuth(req)) return unauthorizedResponse();
         const status = await getTapoDeviceStatus();
         return Response.json(status);
       
       case '/state':
+        if (!checkApiAuth(req)) return unauthorizedResponse();
         return Response.json({ ...getState(), timestamp: new Date().toISOString() });
       
       case '/reset':
+        if (!checkApiAuth(req)) return unauthorizedResponse();
         resetState();
         return Response.json({ success: true, message: 'State reset', timestamp: new Date().toISOString() });
       
@@ -572,9 +816,7 @@ serve({
   },
 });
 
-const CHECK_INTERVAL = (parseInt(process.env.CHECK_INTERVAL) || 300) * 1000;
-
 setInterval(async () => {
   console.log(`\n⏰ ${new Date().toISOString()} - Checking dryer status...`);
   await checkDryerStatus();
-}, CHECK_INTERVAL);
+}, CONFIG.CHECK_INTERVAL * 1000);
