@@ -3,6 +3,15 @@ import crypto from 'crypto';
 
 const TERMINAL_UUID = "00-00-00-00-00-00";
 
+function parsePort(value) {
+  if (value === undefined) return 3000;
+  const trimmed = value.trim();
+  if (trimmed === '' || trimmed === '0') return null;
+  const port = parseInt(trimmed, 10);
+  if (Number.isNaN(port) || port <= 0) return null;
+  return port;
+}
+
 const CONFIG = {
   TAPO_EMAIL: process.env.TAPO_EMAIL,
   TAPO_PASSWORD: process.env.TAPO_PASSWORD,
@@ -18,7 +27,7 @@ const CONFIG = {
   OFF_THRESHOLD: parseInt(process.env.OFF_THRESHOLD) || 50,
   COOLDOWN_READINGS: parseInt(process.env.COOLDOWN_READINGS) || 3,
   CHECK_INTERVAL: parseInt(process.env.CHECK_INTERVAL) || 60,
-  PORT: parseInt(process.env.PORT) || 3000,
+  PORT: parsePort(process.env.PORT),
 };
 
 function validateEnvironment() {
@@ -72,6 +81,32 @@ function checkApiAuth(req) {
 
 function unauthorizedResponse() {
   return Response.json({ error: 'Unauthorized' }, { status: 401 });
+}
+
+function getClientAddress(req, server) {
+  const ip = server.requestIP(req);
+  if (ip) return ip.address;
+
+  const forwarded = req.headers.get('x-forwarded-for');
+  if (forwarded) return forwarded.split(',')[0].trim();
+
+  return req.headers.get('x-real-ip') || 'unknown';
+}
+
+function logEndpointAccess(req, server, path, authorized) {
+  const client = getClientAddress(req, server);
+  const auth = authorized ? 'authorized' : 'unauthorized';
+  console.log(`📡 ${new Date().toISOString()} ${req.method} ${path} ${auth} from ${client}`);
+}
+
+function guardApiRoute(req, server, path) {
+  if (!checkApiAuth(req)) {
+    logEndpointAccess(req, server, path, false);
+    return unauthorizedResponse();
+  }
+
+  logEndpointAccess(req, server, path, true);
+  return null;
 }
 
 class TapoCrypto {
@@ -455,11 +490,12 @@ async function sendNtfyNotification(data) {
     const body = `Dryer finished! Power is now ${data.currentPower.toFixed(1)}W (was ${data.previousPower.toFixed(1)}W).`;
 
     const response = await fetch(url, {
-      method: 'POST',
+      method: "POST",
       headers: {
-        'Title': '🧺 Dryer Finished!',
-        'Priority': 'high',
-        'Tags': 'laundry,white_check_mark',
+        Title: "🧺 Dryer Finished!",
+        Priority: "default",
+        Tags: "laundry,white_check_mark",
+        Icon: "https://cdnjs.cloudflare.com/ajax/libs/twemoji/16.0.1/72x72/1f9fa.png",
       },
       body,
     });
@@ -771,50 +807,64 @@ validateEnvironment();
 
 validateCredentials().then((credentialsValid) => {
   const status = credentialsValid ? '✅ Ready to monitor' : '⚠️  Running in degraded mode';
-  console.log(`🚀 Tapo Power Alert running on http://localhost:${CONFIG.PORT}`);
+  if (CONFIG.PORT) {
+    console.log(`🚀 Tapo Power Alert running on http://localhost:${CONFIG.PORT}`);
+  } else {
+    console.log('🚀 Tapo Power Alert running (HTTP API disabled)');
+  }
   console.log(`   Status: ${status}`);
   console.log(`📊 Heating threshold: ${CONFIG.HEATING_THRESHOLD}W`);
   console.log(`📊 Off threshold: ${CONFIG.OFF_THRESHOLD}W`);
   console.log(`🔁 Cooldown readings: ${CONFIG.COOLDOWN_READINGS} (every ${CONFIG.CHECK_INTERVAL}s)`);
 });
 
-serve({
-  port: CONFIG.PORT,
-  async fetch(req) {
-    const url = new URL(req.url);
-    const path = url.pathname;
-    
-    switch (path) {
-      case '/':
-        return new Response('Tapo Power Alert is running', { status: 200 });
-      
-      case '/health':
-        return Response.json({ status: 'healthy', timestamp: new Date().toISOString() });
-      
-      case '/check':
-        if (!checkApiAuth(req)) return unauthorizedResponse();
-        const checkResult = await checkDryerStatus();
-        return Response.json(checkResult);
-      
-      case '/status':
-        if (!checkApiAuth(req)) return unauthorizedResponse();
-        const status = await getTapoDeviceStatus();
-        return Response.json(status);
-      
-      case '/state':
-        if (!checkApiAuth(req)) return unauthorizedResponse();
-        return Response.json({ ...getState(), timestamp: new Date().toISOString() });
-      
-      case '/reset':
-        if (!checkApiAuth(req)) return unauthorizedResponse();
-        resetState();
-        return Response.json({ success: true, message: 'State reset', timestamp: new Date().toISOString() });
-      
-      default:
-        return new Response('Not Found', { status: 404 });
-    }
-  },
-});
+if (CONFIG.PORT) {
+  serve({
+    port: CONFIG.PORT,
+    async fetch(req, server) {
+      const url = new URL(req.url);
+      const path = url.pathname;
+
+      switch (path) {
+        case '/':
+          return new Response('Tapo Power Alert is running', { status: 200 });
+
+        case '/health':
+          return Response.json({ status: 'healthy', timestamp: new Date().toISOString() });
+
+        case '/check': {
+          const denied = guardApiRoute(req, server, path);
+          if (denied) return denied;
+          const checkResult = await checkDryerStatus();
+          return Response.json(checkResult);
+        }
+
+        case '/status': {
+          const denied = guardApiRoute(req, server, path);
+          if (denied) return denied;
+          const status = await getTapoDeviceStatus();
+          return Response.json(status);
+        }
+
+        case '/state': {
+          const denied = guardApiRoute(req, server, path);
+          if (denied) return denied;
+          return Response.json({ ...getState(), timestamp: new Date().toISOString() });
+        }
+
+        case '/reset': {
+          const denied = guardApiRoute(req, server, path);
+          if (denied) return denied;
+          resetState();
+          return Response.json({ success: true, message: 'State reset', timestamp: new Date().toISOString() });
+        }
+
+        default:
+          return new Response('Not Found', { status: 404 });
+      }
+    },
+  });
+}
 
 setInterval(async () => {
   console.log(`\n⏰ ${new Date().toISOString()} - Checking dryer status...`);
