@@ -2,7 +2,92 @@
 
 A small Bun server that watches a Tapo P110 smart plug and sends a push notification when your dryer finishes.
 
-**New here?** Start with [QUICKSTART.md](QUICKSTART.md) — you'll be running in 10 minutes.
+## Quick start
+
+Get push notifications on your phone when the dryer finishes. Takes about 10 minutes.
+
+### What you need
+
+- A **Tapo P110** smart plug on the dryer's power
+- A computer on the same home network (Mac, Linux, Raspberry Pi, etc.)
+- **[Bun](https://bun.sh)** installed
+- The **[ntfy](https://ntfy.sh)** app on each phone (free)
+
+### 1. Install Bun
+
+```bash
+curl -fsSL https://bun.sh/install | bash
+```
+
+### 2. Configure
+
+```bash
+git clone <your-repo-url>
+cd tapo-power-alert
+cp .env.example .env
+nano .env   # or use any text editor
+```
+
+Fill in these values:
+
+```bash
+# Your Tapo account (same as the Tapo app)
+TAPO_EMAIL=you@example.com
+TAPO_PASSWORD=your_tapo_password
+TAPO_DEVICE_IP=192.168.1.100    # P110 IP — find it in your router
+
+# Pick a random topic name (both phones will subscribe to this)
+NTFY_TOPIC=dryer-finished-xK9m2pQ
+```
+
+Everything else has sensible defaults. Email via Postmark is optional — see [Configuration](#configuration) if you want it as a backup.
+
+**Find the P110 IP:** open your router's admin page → connected devices → look for the Tapo plug.
+
+### 3. Set up phones
+
+On **each phone**:
+
+1. Install **ntfy** ([iOS](https://apps.apple.com/app/ntfy/id1625396347) / [Android](https://play.google.com/store/apps/details?id=io.heckel.ntfy))
+2. Tap **+** → **Subscribe to topic**
+3. Enter your `NTFY_TOPIC` name (e.g. `dryer-finished-xK9m2pQ`)
+4. Tap **Subscribe**
+
+Both phones are done. One alert reaches everyone subscribed to the topic.
+
+### 4. Run
+
+```bash
+bun run dev      # development (auto-reload)
+bun run start    # production
+```
+
+You should see something like:
+
+```
+✅ Credentials validated successfully!
+📊 Device is online and responding
+⚡ Current power: 12.3W
+📱 Push notifications enabled: https://ntfy.sh/dryer-finished-xK9m2pQ
+📧 Email notifications disabled (missing EMAIL_TO or POSTMARK_API_TOKEN)
+
+🚀 Tapo Power Alert running on http://localhost:3000
+   Status: ✅ Ready to monitor
+📊 Heating threshold: 1500W
+📊 Off threshold: 50W
+🔁 Cooldown readings: 3 (every 60s)
+```
+
+If credential validation fails, double-check `TAPO_DEVICE_IP` and your Tapo login — the server still starts but monitoring will fail until credentials are fixed.
+
+### 5. Verify
+
+```bash
+curl http://localhost:3000/status    # current power draw
+curl http://localhost:3000/state     # monitoring state
+```
+
+Run a dryer cycle and watch the logs. When it finishes you should get a push on both phones within a few minutes.
 
 ## Features
 
@@ -11,28 +96,8 @@ A small Bun server that watches a Tapo P110 smart plug and sends a push notifica
 - Optional email backup via Postmark
 - Detects real "finished" state, not just the cooling phase
 - Validates Tapo credentials on startup
+- Logs API endpoint access (timestamp, path, auth result, client IP)
 - Lightweight single-file app (`server.js`)
-
-## Prerequisites
-
-| Item | Notes |
-|------|-------|
-| Tapo P110 | Plugged into the dryer's power supply |
-| Bun | [bun.sh](https://bun.sh) |
-| ntfy app | Free on [iOS](https://apps.apple.com/app/ntfy/id1625396347) and [Android](https://play.google.com/store/apps/details?id=io.heckel.ntfy) |
-| Postmark account | Optional — only if you want email too |
-
-## Installation
-
-```bash
-curl -fsSL https://bun.sh/install | bash
-
-git clone <your-repo-url>
-cd tapo-power-alert
-
-cp .env.example .env
-# edit .env — see Configuration below
-```
 
 ## Configuration
 
@@ -68,9 +133,10 @@ POSTMARK_API_TOKEN=your_postmark_api_token
 ```bash
 HEATING_THRESHOLD=1500    # must see this before a cycle counts (W)
 OFF_THRESHOLD=50          # power below this = dryer is off (W)
+RUNNING_THRESHOLD=800     # used for status reporting (W)
 COOLDOWN_READINGS=3       # consecutive off readings before alert
 CHECK_INTERVAL=60         # seconds between checks
-PORT=3000
+PORT=3000                 # set to 0 or empty to disable HTTP API (monitoring still runs)
 ```
 
 ### Optional — API security
@@ -79,16 +145,7 @@ PORT=3000
 API_KEY=your-secret-key
 ```
 
-When set, `/check`, `/status`, `/state`, and `/reset` require `Authorization: Bearer your-secret-key` or `?key=your-secret-key`.
-
-## Usage
-
-```bash
-bun run dev      # development (auto-reload)
-bun run start    # production
-```
-
-On startup the server connects to your P110 and prints whether push/email are configured.
+When set, `/check`, `/status`, `/state`, and `/reset` require `Authorization: Bearer your-secret-key` or `?key=your-secret-key`. Each request is logged to stdout.
 
 ## How it works
 
@@ -116,6 +173,8 @@ Heating (>1500W)  →  Cooling (100–300W)  →  Off (<50W)  →  Alert
 
 ## API endpoints
 
+Set `PORT=0` or `PORT=` in `.env` to run monitoring only with no HTTP server. Useful when you do not need `curl` access and do not want the API reachable on your network.
+
 | Endpoint | Auth | Description |
 |----------|------|-------------|
 | `GET /` | — | Simple health check |
@@ -125,9 +184,12 @@ Heating (>1500W)  →  Cooling (100–300W)  →  Off (<50W)  →  Alert
 | `GET /check` | API key | Run one detection cycle now |
 | `GET /reset` | API key | Reset monitoring state (for testing) |
 
+Auth is only enforced when `API_KEY` is set. Without it, all endpoints are open on localhost.
+
 ```bash
 curl http://localhost:3000/status
 curl -H "Authorization: Bearer your-secret-key" http://localhost:3000/state
+curl "http://localhost:3000/status?key=your-secret-key"
 ```
 
 ## Tuning
@@ -149,27 +211,15 @@ Alert delay = `CHECK_INTERVAL` × `COOLDOWN_READINGS` (default: 180 seconds).
 
 ## Troubleshooting
 
-### Credential validation failed
-
-- Confirm `TAPO_DEVICE_IP` matches your router's device list
-- Use the same email/password as the Tapo app
-- Ping the device: `ping 192.168.1.100`
-- Server and plug must be on the same network
-
-### No push notification
-
-- Both phones must subscribe to the exact `NTFY_TOPIC` in the ntfy app
-- Check server logs for `📱 Push notification sent via ntfy`
-- Test manually: `curl -d "test" https://ntfy.sh/your-topic-name`
-
-### No email
-
-- Verify Postmark token and that `EMAIL_FROM` is verified in Postmark
-- Check spam folder
-
-### Missed notification after server restart
-
-State is in-memory only. If the server restarts mid-cycle it may miss that cycle. It will catch the next one.
+| Problem | Fix |
+|---------|-----|
+| Credential validation failed | Confirm `TAPO_DEVICE_IP` in router; use same email/password as Tapo app; ping the device |
+| Connection failed | Check `TAPO_DEVICE_IP`; server and plug must be on the same network |
+| No push notification | Confirm both phones subscribed to the exact `NTFY_TOPIC`; check logs for `📱 Push notification sent via ntfy`; test with `curl -d "test" https://ntfy.sh/your-topic-name` |
+| No email | Verify Postmark token and that `EMAIL_FROM` is verified in Postmark; check spam folder |
+| Alert too early | Increase `COOLDOWN_READINGS` or `OFF_THRESHOLD` in `.env` |
+| Alert too late | Decrease `COOLDOWN_READINGS` or `CHECK_INTERVAL` in `.env` |
+| Missed alert after restart | State is in-memory only — server lost state mid-cycle; it'll catch the next one |
 
 ## Run as a service
 
@@ -205,19 +255,18 @@ sudo journalctl -u tapo-power-alert -f    # view logs
 
 ### Docker
 
-```dockerfile
-FROM oven/bun:latest
-WORKDIR /app
-COPY package.json bun.lockb* ./
-RUN bun install --frozen-lockfile
-COPY . .
-CMD ["bun", "run", "start"]
-```
-
 ```bash
 docker build -t tapo-power-alert .
-docker run -d --env-file .env tapo-power-alert
+docker run -d --env-file .env -p 3000:3000 tapo-power-alert
 ```
+
+Or with Docker Compose:
+
+```bash
+docker compose up -d
+```
+
+The `compose.yml` reads `.env` and maps `${PORT:-3000}`.
 
 ## Project structure
 
@@ -226,7 +275,8 @@ tapo-power-alert/
 ├── server.js        # everything lives here
 ├── package.json
 ├── .env.example
-├── QUICKSTART.md    # start here
+├── Dockerfile
+├── compose.yml
 └── README.md
 ```
 
