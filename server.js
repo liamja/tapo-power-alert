@@ -693,6 +693,14 @@ async function checkDryerStatus() {
     if (state.isFirstCheck) {
       console.log('📍 First check - initializing state');
       state.isFirstCheck = false;
+      if (isHeating) {
+        state.hasSeenHeatingThisCycle = true;
+        console.log(`🔥 Dryer heating (${currentPower.toFixed(1)}W)`);
+      } else if (isRunning) {
+        console.log(`🌀 Dryer running/cooling (${currentPower.toFixed(1)}W)`);
+      } else {
+        console.log(`😴 Idle (${currentPower.toFixed(1)}W)`);
+      }
     } else if (isHeating) {
       if (state.notificationSent) {
         console.log('🔄 New cycle detected - resetting notification flag');
@@ -805,6 +813,16 @@ console.log('');
 
 validateEnvironment();
 
+async function runDryerStatusCheck() {
+  console.log(`\n⏰ ${new Date().toISOString()} - Checking dryer status...`);
+  await checkDryerStatus();
+}
+
+function startMonitoring() {
+  runDryerStatusCheck();
+  setInterval(runDryerStatusCheck, CONFIG.CHECK_INTERVAL * 1000);
+}
+
 validateCredentials().then((credentialsValid) => {
   const status = credentialsValid ? '✅ Ready to monitor' : '⚠️  Running in degraded mode';
   if (CONFIG.PORT) {
@@ -816,6 +834,7 @@ validateCredentials().then((credentialsValid) => {
   console.log(`📊 Heating threshold: ${CONFIG.HEATING_THRESHOLD}W`);
   console.log(`📊 Off threshold: ${CONFIG.OFF_THRESHOLD}W`);
   console.log(`🔁 Cooldown readings: ${CONFIG.COOLDOWN_READINGS} (every ${CONFIG.CHECK_INTERVAL}s)`);
+  startMonitoring();
 });
 
 if (CONFIG.PORT) {
@@ -865,8 +884,3 @@ if (CONFIG.PORT) {
     },
   });
 }
-
-setInterval(async () => {
-  console.log(`\n⏰ ${new Date().toISOString()} - Checking dryer status...`);
-  await checkDryerStatus();
-}, CONFIG.CHECK_INTERVAL * 1000);
