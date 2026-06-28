@@ -487,17 +487,20 @@ async function sendNtfyNotification(data) {
 
   try {
     const url = `${CONFIG.NTFY_SERVER.replace(/\/$/, '')}/${CONFIG.NTFY_TOPIC}`;
-    const body = `Dryer finished! Power is now ${data.currentPower.toFixed(1)}W (was ${data.previousPower.toFixed(1)}W).`;
+    const message = `Dryer finished! Power is now ${data.currentPower.toFixed(1)}W (was ${data.previousPower.toFixed(1)}W).`;
 
+    // JSON body avoids HTTP header encoding limits (emoji in Title fails as a header)
     const response = await fetch(url, {
-      method: "POST",
+      method: 'POST',
       headers: {
-        Title: "🧺 Dryer Finished!",
-        Priority: "default",
-        Tags: "laundry,white_check_mark",
-        Icon: "https://cdnjs.cloudflare.com/ajax/libs/twemoji/16.0.1/72x72/1f9fa.png",
+        'Content-Type': 'application/json',
       },
-      body,
+      body: JSON.stringify({
+        title: '🧺 Dryer Finished!',
+        message,
+        priority: 4,
+        tags: ['laundry', 'white_check_mark'],
+      }),
     });
 
     if (!response.ok) {
