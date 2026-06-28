@@ -260,13 +260,51 @@ docker build -t tapo-power-alert .
 docker run -d --env-file .env -p 3000:3000 tapo-power-alert
 ```
 
-Or with Docker Compose:
+Or with Docker Compose (local / same LAN as the plug):
 
 ```bash
 docker compose up -d
 ```
 
 The `compose.yml` reads `.env` and maps `${PORT:-3000}`.
+
+### Docker on a remote server (WireGuard)
+
+Use `compose.server.yml` when the app runs on a VPS or other host that is **not** on your home LAN. It runs [gluetun](https://github.com/qdm12/gluetun) as a WireGuard client so the app can reach `TAPO_DEVICE_IP` over your home network.
+
+Setup follows gluetun's [custom WireGuard provider](https://github.com/qdm12/gluetun-wiki/blob/main/setup/providers/custom.md#wireguard) docs: `VPN_SERVICE_PROVIDER=custom`, `VPN_TYPE=wireguard`, and a `wg0.conf` file bind-mounted to `/gluetun/wireguard/wg0.conf`.
+
+1. Enable WireGuard on your home router or VPN server and create a **client peer** for this host.
+2. Copy the WireGuard config example and fill in your keys:
+
+   ```bash
+   cp wireguard/wg0.conf.example wireguard/wg0.conf
+   chmod 600 wireguard/wg0.conf
+   ```
+
+   - Set `AllowedIPs` to your home LAN subnet (e.g. `192.168.1.0/24`). Do **not** use `0.0.0.0/0` unless you intend to route all traffic through home — split routing keeps ntfy and Postmark working over normal internet egress.
+   - Set `Endpoint` to your home **public IP address and port** (gluetun does not support hostnames for the endpoint; resolve DDNS to an IP if needed).
+
+   Alternatively, you can pass WireGuard settings via gluetun environment variables (`WIREGUARD_ENDPOINT_IP`, `WIREGUARD_PRIVATE_KEY`, etc.) instead of a config file — see the gluetun wiki linked above.
+
+3. Set `TAPO_DEVICE_IP` in `.env` to the plug's **LAN** address and reserve that IP in your router's DHCP settings.
+4. Set `API_KEY` in `.env` if you expose the HTTP port on the server.
+5. Deploy:
+
+   ```bash
+   docker compose -f compose.server.yml up -d
+   docker compose -f compose.server.yml logs -f tapo-power-alert
+   ```
+
+6. Verify the tunnel can reach the plug (replace with your `TAPO_DEVICE_IP`):
+
+   ```bash
+   docker compose -f compose.server.yml exec tapo-power-alert ping -c 3 192.168.1.100
+   ```
+
+### Laravel Forge
+
+See [`forge/README.md`](forge/README.md) for Nginx reverse-proxy template, deploy script, Docker permissions for the `forge` user, shared paths for `wireguard/wg0.conf`, and SSL.
 
 ## Project structure
 
@@ -276,7 +314,11 @@ tapo-power-alert/
 ├── package.json
 ├── .env.example
 ├── Dockerfile
-├── compose.yml
+├── compose.yml           # local / same-LAN deploy
+├── compose.server.yml    # remote server + WireGuard (gluetun)
+├── forge/                # Laravel Forge nginx template + deploy script
+├── wireguard/
+│   └── wg0.conf.example
 └── README.md
 ```
 

@@ -1,0 +1,51 @@
+# Remote server deploy: WireGuard (gluetun) + tapo-power-alert
+#
+# Prerequisites:
+#   1. WireGuard server on your home router/gateway with a client peer for this host
+#   2. wireguard/wg0.conf (copy from wireguard/wg0.conf.example)
+#   3. .env with TAPO_DEVICE_IP set to the plug's LAN address (e.g. 192.168.1.100)
+#   4. API_KEY set if you publish the HTTP port
+#
+# Gluetun custom WireGuard provider:
+#   https://github.com/qdm12/gluetun-wiki/blob/main/setup/providers/custom.md#wireguard
+#
+# Usage:
+#   docker compose -f compose.server.yml up -d
+#   docker compose -f compose.server.yml logs -f tapo-power-alert
+#
+# Binds HTTP to 127.0.0.1 only — pair with forge/nginx-template.conf on Laravel Forge.
+
+name: tapo-power-alert
+
+services:
+  vpn:
+    image: qmcgaw/gluetun:latest
+    container_name: tapo-power-alert-vpn
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    volumes:
+      - ./wireguard/wg0.conf:/gluetun/wireguard/wg0.conf:ro
+    environment:
+      VPN_SERVICE_PROVIDER: custom
+      VPN_TYPE: wireguard
+    ports:
+      - "127.0.0.1:${PORT:-3000}:${PORT:-3000}"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "/gluetun-entrypoint", "healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  tapo-power-alert:
+    build: .
+    container_name: tapo-power-alert
+    restart: unless-stopped
+    env_file: .env
+    network_mode: service:vpn
+    depends_on:
+      vpn:
+        condition: service_healthy

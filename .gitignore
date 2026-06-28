@@ -2,6 +2,9 @@
 node_modules/
 bun.lockb
 
+# WireGuard client config (private keys)
+wireguard/*.conf
+
 # Environment files
 .env
 .env.local

@@ -1,0 +1,24 @@
+# Copy to wg0.conf and fill in. wg0.conf is gitignored (contains private keys).
+#
+# Create a WireGuard client peer on your home VPN server (router, NAS, etc.) and
+# paste its keys below. AllowedIPs must include your home LAN so the app can reach
+# TAPO_DEVICE_IP. Use split routing (LAN only) so ntfy/Postmark still reach the
+# public internet directly from the remote server.
+#
+# Gluetun mounts this file at /gluetun/wireguard/wg0.conf — see:
+# https://github.com/qdm12/gluetun-wiki/blob/main/setup/providers/custom.md#wireguard
+#
+# Endpoint must be an IP address (not a hostname). If you use DDNS, resolve it
+# to your current public IP before deploying.
+#
+# Reserve the Tapo plug's IP in your router DHCP settings before deploying.
+
+[Interface]
+PrivateKey = REPLACE_WITH_CLIENT_PRIVATE_KEY
+Address = 10.64.222.21/32
+
+[Peer]
+PublicKey = REPLACE_WITH_SERVER_PUBLIC_KEY
+Endpoint = 1.2.3.4:51820
+AllowedIPs = 192.168.1.0/24
+PersistentKeepalive = 25
