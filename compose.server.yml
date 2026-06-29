@@ -2,7 +2,7 @@
 #
 # Prerequisites:
 #   1. WireGuard server on your home router/gateway with a client peer for this host
-#   2. wireguard/wg0.conf (copy from wireguard/wg0.conf.example)
+#   2. wireguard/wg0.conf locally, or $FORGE_SITE_ROOT/wg0.conf on Forge
 #   3. .env with TAPO_DEVICE_IP set to the plug's LAN address (e.g. 192.168.1.100)
 #   4. API_KEY set if you publish the HTTP port
 #
@@ -26,7 +26,7 @@ services:
     devices:
       - /dev/net/tun:/dev/net/tun
     volumes:
-      - ./wireguard/wg0.conf:/gluetun/wireguard/wg0.conf:ro
+      - ${WIREGUARD_CONFIG_PATH:-./wireguard/wg0.conf}:/gluetun/wireguard/wg0.conf:ro
     environment:
       VPN_SERVICE_PROVIDER: custom
       VPN_TYPE: wireguard
