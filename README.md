@@ -132,9 +132,10 @@ POSTMARK_API_TOKEN=your_postmark_api_token
 
 ```bash
 HEATING_THRESHOLD=1500    # must see this before a cycle counts (W)
+COOLING_THRESHOLD=100     # below this after heating = finishing (W)
 OFF_THRESHOLD=50          # power below this = dryer is off (W)
 RUNNING_THRESHOLD=800     # used for status reporting (W)
-COOLDOWN_READINGS=3       # consecutive off readings before alert
+COOLDOWN_READINGS=3       # consecutive finished readings before alert
 CHECK_INTERVAL=60         # seconds between checks
 PORT=3000                 # set to 0 or empty to disable HTTP API (monitoring still runs)
 ```
@@ -150,15 +151,15 @@ When set, `/check`, `/status`, `/state`, and `/reset` require `Authorization: Be
 ## How it works
 
 ```
-Heating (>1500W)  →  Cooling (100–300W)  →  Off (<50W)  →  Alert
-     ↑                      ↑                    ↑
-  cycle starts          still running      3 checks in a row
+Heating (>1500W)  →  Cooling (100–300W)  →  Finished (<100W)  →  Alert
+     ↑                      ↑                       ↑
+  cycle starts          still running         3 checks in a row
 ```
 
 1. Poll the P110 every `CHECK_INTERVAL` seconds (default: 60s)
 2. Wait until power exceeds `HEATING_THRESHOLD` — confirms a real dry cycle
-3. Ignore the cooling phase (typically 100–300W, still above `OFF_THRESHOLD`)
-4. When power stays below `OFF_THRESHOLD` for `COOLDOWN_READINGS` consecutive checks, send notification
+3. Ignore the cooling phase (typically 100–300W, still at or above `COOLING_THRESHOLD`)
+4. When power stays below `COOLING_THRESHOLD` for `COOLDOWN_READINGS` consecutive checks, send notification
 5. Reset when the next heating cycle starts
 
 **Default timing:** 3 checks × 60 seconds = ~3 minutes after the dryer actually stops.
@@ -202,8 +203,8 @@ curl http://localhost:3000/status
 
 | Symptom | Try |
 |---------|-----|
-| Alert while dryer still tumbling | Raise `OFF_THRESHOLD` (e.g. 80) or `COOLDOWN_READINGS` |
-| Alert never fires | Lower `HEATING_THRESHOLD`; check logs for power readings |
+| Alert while dryer still tumbling | Raise `COOLING_THRESHOLD` (e.g. 150) or `COOLDOWN_READINGS` |
+| Alert never fires | Lower `HEATING_THRESHOLD` or `COOLING_THRESHOLD`; check logs for power readings |
 | Alert too slow | Lower `CHECK_INTERVAL` or `COOLDOWN_READINGS` |
 | Alert too fast | Raise `COOLDOWN_READINGS` |
 
@@ -217,7 +218,7 @@ Alert delay = `CHECK_INTERVAL` × `COOLDOWN_READINGS` (default: 180 seconds).
 | Connection failed | Check `TAPO_DEVICE_IP`; server and plug must be on the same network |
 | No push notification | Confirm both phones subscribed to the exact `NTFY_TOPIC`; check logs for `📱 Push notification sent via ntfy`; test with `curl -d "test" https://ntfy.sh/your-topic-name` |
 | No email | Verify Postmark token and that `EMAIL_FROM` is verified in Postmark; check spam folder |
-| Alert too early | Increase `COOLDOWN_READINGS` or `OFF_THRESHOLD` in `.env` |
+| Alert too early | Increase `COOLDOWN_READINGS` or `COOLING_THRESHOLD` in `.env` |
 | Alert too late | Decrease `COOLDOWN_READINGS` or `CHECK_INTERVAL` in `.env` |
 | Missed alert after restart | State is in-memory only — server lost state mid-cycle; it'll catch the next one |
 

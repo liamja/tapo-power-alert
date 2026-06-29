@@ -25,6 +25,7 @@ const CONFIG = {
   RUNNING_THRESHOLD: parseInt(process.env.RUNNING_THRESHOLD) || 800,
   HEATING_THRESHOLD: parseInt(process.env.HEATING_THRESHOLD) || 1500,
   OFF_THRESHOLD: parseInt(process.env.OFF_THRESHOLD) || 50,
+  COOLING_THRESHOLD: parseInt(process.env.COOLING_THRESHOLD) || 100,
   COOLDOWN_READINGS: parseInt(process.env.COOLDOWN_READINGS) || 3,
   CHECK_INTERVAL: parseInt(process.env.CHECK_INTERVAL) || 60,
   PORT: parsePort(process.env.PORT),
@@ -682,14 +683,17 @@ async function checkDryerStatus() {
     const runningThreshold = CONFIG.RUNNING_THRESHOLD;
     const heatingThreshold = CONFIG.HEATING_THRESHOLD;
     const offThreshold = CONFIG.OFF_THRESHOLD;
+    const coolingThreshold = CONFIG.COOLING_THRESHOLD;
     const cooldownReadings = CONFIG.COOLDOWN_READINGS;
     const previousPower = state.previousPower;
     const wasRunning = previousPower > runningThreshold;
     const isRunning = currentPower > runningThreshold;
     const isHeating = currentPower > heatingThreshold;
     const isOff = currentPower < offThreshold;
+    const isCooling = state.hasSeenHeatingThisCycle && !isHeating && currentPower >= coolingThreshold;
+    const isFinishedReading = state.hasSeenHeatingThisCycle && !isHeating && currentPower < coolingThreshold;
     
-    console.log(`⚡ Power: ${currentPower.toFixed(1)}W (heating: >${heatingThreshold}W, off: <${offThreshold}W, previous: ${previousPower.toFixed(1)}W)`);
+    console.log(`⚡ Power: ${currentPower.toFixed(1)}W (heating: >${heatingThreshold}W, finished: <${coolingThreshold}W, off: <${offThreshold}W, previous: ${previousPower.toFixed(1)}W)`);
     
     let notificationResult = null;
     
@@ -713,10 +717,10 @@ async function checkDryerStatus() {
       state.consecutiveLowReadings = 0;
       state.notificationSent = false;
       console.log(`🔥 Dryer heating (${currentPower.toFixed(1)}W)`);
-    } else if (state.hasSeenHeatingThisCycle && isOff) {
+    } else if (isFinishedReading) {
       state.consecutiveLowReadings++;
 
-      console.log(`📉 Low power: ${state.consecutiveLowReadings}/${cooldownReadings} consecutive readings`);
+      console.log(`📉 Finishing: ${state.consecutiveLowReadings}/${cooldownReadings} consecutive readings below ${coolingThreshold}W`);
 
       if (state.consecutiveLowReadings >= cooldownReadings && !state.notificationSent) {
         console.log('🎉 Dryer finished! Sending notification...');
@@ -730,7 +734,7 @@ async function checkDryerStatus() {
           state.notificationSent = true;
         }
       }
-    } else if (isRunning) {
+    } else if (isCooling || isRunning) {
       state.consecutiveLowReadings = 0;
       console.log(`🌀 Dryer running/cooling (${currentPower.toFixed(1)}W)`);
     } else {
@@ -746,6 +750,8 @@ async function checkDryerStatus() {
       isRunning,
       isHeating,
       isOff,
+      isCooling,
+      isFinishedReading,
       hasSeenHeatingThisCycle: state.hasSeenHeatingThisCycle,
       consecutiveLowReadings: state.consecutiveLowReadings,
       notificationSent: state.notificationSent,
@@ -835,6 +841,7 @@ validateCredentials().then((credentialsValid) => {
   }
   console.log(`   Status: ${status}`);
   console.log(`📊 Heating threshold: ${CONFIG.HEATING_THRESHOLD}W`);
+  console.log(`📊 Cooling threshold: ${CONFIG.COOLING_THRESHOLD}W (below = finishing)`);
   console.log(`📊 Off threshold: ${CONFIG.OFF_THRESHOLD}W`);
   console.log(`🔁 Cooldown readings: ${CONFIG.COOLDOWN_READINGS} (every ${CONFIG.CHECK_INTERVAL}s)`);
   startMonitoring();
